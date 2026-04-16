@@ -13,17 +13,77 @@ Detect regime changes in multi-variable timeseries by comparing two exact change
 
 ## Dataset
 
-7 synthetic sensor variables, 600 hourly samples each, with planted regime shifts:
+1 000 hourly samples across 7 sensor variables with **realistic, messy characteristics**:
 
-| Variable | Unit | Planted changepoints (sample index) |
-|---|---|---|
-| `temperature_C` | °C | 120, 280, 420 |
-| `pressure_hPa` | hPa | 100, 260, 400 |
-| `vibration_mm_s` | mm/s | 150, 320 *(+ sinusoidal component)* |
-| `humidity_pct` | % | 90, 210, 370, 490 |
-| `current_A` | A | 140, 290, 430 |
-| `rpm` | RPM | 110, 240, 360, 470 |
-| `sound_dB` | dB | 180, 350 |
+- **Sigmoid transitions** — regime shifts ramp over 8–45 samples (not hard steps)
+- **AR(1) autocorrelated noise** — consecutive samples are correlated (φ = 0.5–0.85)
+- **Heteroscedastic noise** — each regime has its own noise level
+- **Within-segment drift** — slow sinusoidal wandering inside regimes
+- **Random outlier spikes** — 1–2 % of samples are sensor glitch bursts
+- **Inter-variable coupling** — humidity is anti-correlated with temperature; sound tracks RPM
+- **Diurnal cycle** — 24 h + 12 h oscillation embedded in temperature
+
+| Variable | Unit | Planted changepoints (approx. sample) | Notable characteristic |
+|---|---|---|---|
+| `temperature_C` | °C | 220, 500, 730 | 24 h diurnal cycle |
+| `pressure_hPa` | hPa | 200, 460, 760 | Very wide (45-sample) sigmoid transitions |
+| `vibration_mm_s` | mm/s | 180, 380, 530, 730 | Two harmonic oscillations |
+| `humidity_pct` | % | 220, 500, 730 | Anti-correlated with temperature |
+| `current_A` | A | 250, 450, 630, 810 | Medium transitions, low noise |
+| `rpm` | RPM | 200, 420, 590, 780 | High noise relative to signal amplitude |
+| `sound_dB` | dB | 250, 500, 750 | Weakly coupled to RPM |
+
+---
+
+## Results
+
+Tested on 1 000-sample signals with tuned penalties per variable:
+
+| Variable | Target CPs | PELT found | KernelCPD found | Avg offset PELT | Avg offset KernelCPD |
+|---|---|---|---|---|---|
+| temperature_C | 3 | **3** ✓ | **3** ✓ | ~23 samples | ~22 samples |
+| pressure_hPa | 3 | **3** ✓ | **3** ✓ | ~74 samples | ~74 samples |
+| vibration_mm_s | 4 | **4** ✓ | **4** ✓ | ~5 samples | ~5 samples |
+| humidity_pct | 3 | **3** ✓ | **3** ✓ | ~22 samples | ~23 samples |
+| current_A | 4 | **4** ✓ | **4** ✓ | ~10 samples | ~9 samples |
+| rpm | 4 | **3** ✗ | **4** ✓ | ~15 samples | ~19 samples |
+| sound_dB | 3 | **3** ✓ | **3** ✓ | ~22 samples | ~22 samples |
+
+> Avg offset = mean distance from each detected changepoint to the nearest planted one.
+
+---
+
+## Conclusions
+
+### 1. Both methods agree when the signal is well-behaved
+For 6 out of 7 variables, PELT and KernelCPD detected the same number of changepoints at nearly identical positions (within 1–3 samples). When both agree, that agreement is strong evidence of a real regime shift.
+
+### 2. KernelCPD has an edge on noisy, high-amplitude signals
+On `rpm` — the noisiest signal relative to its shift magnitudes — PELT missed one changepoint while KernelCPD recovered all four. This is because KernelCPD operates in a reproducing kernel Hilbert space (RKHS) and is sensitive to changes in the **full distribution**, not just the mean or variance. Subtle shifts that barely move the mean can still produce a detectable change in the kernel embedding.
+
+### 3. Gradual transitions reduce accuracy for both methods equally
+`pressure_hPa` had the largest offset error (~74 samples) for **both** algorithms. With a 45-sample sigmoid ramp, the "true" changepoint location is inherently ambiguous — neither method can pinpoint it exactly, and neither has a clear advantage. Offset errors shrink to ~5 samples for abrupt changes (`vibration_mm_s`).
+
+### 4. Periodic and coupled signals require more careful penalty tuning
+Temperature's 24 h diurnal cycle and vibration's harmonics required significantly higher KernelCPD penalties (20× the initial guess) to avoid over-segmentation. Embedded frequencies inflate the kernel cost and make the algorithm over-sensitive. PELT was less affected by this. If your signal has known periodic components, consider detrending first.
+
+### 5. Penalty scales are not transferable between methods
+The penalty that works for PELT rarely works for KernelCPD on the same signal, because they optimise fundamentally different cost functions. Always tune each method independently.
+
+### 6. Runtime: KernelCPD is competitive at n = 1 000
+Despite its O(n²) worst-case complexity, KernelCPD ran in **7–8 ms** per variable versus **34–200 ms** for PELT on this dataset. At n = 1 000, the C-accelerated kernel matrix computation is well-optimised. PELT's advantage grows significantly at larger n (tens of thousands of samples).
+
+### When to use which
+
+| Situation | Recommended |
+|---|---|
+| Fast prototype, unknown signal type | **PELT** — fast, robust, easy to tune |
+| Signal has subtle or distributional shifts | **KernelCPD** — more sensitive |
+| Periodic / oscillatory components present | **PELT** — less sensitive to harmonics |
+| Very long signals (n > 10 000) | **PELT** — O(n) vs O(n²) matters |
+| Need high detection recall on noisy data | **KernelCPD** — found the RPM shift PELT missed |
+| Both methods agree | High-confidence changepoint |
+| Methods disagree | Inspect manually — the change may be subtle or spurious |
 
 ---
 
@@ -31,8 +91,8 @@ Detect regime changes in multi-variable timeseries by comparing two exact change
 
 ```
 signal_segmentation/
-├── generate_data.py          # Generate the synthetic CSV dataset
-├── timeseries_data.csv       # 600-row × 7-variable dataset (auto-generated)
+├── generate_data.py          # Realistic multi-sensor CSV generator
+├── timeseries_data.csv       # 1 000-row × 7-variable dataset (auto-generated)
 ├── signal_segmentation.ipynb # Main notebook: detection + comparison + visualisation
 ├── pelt_vs_kernel.png        # Output figure (auto-generated by notebook)
 ├── pyproject.toml            # Project dependencies
@@ -88,21 +148,10 @@ uv run jupyter lab signal_segmentation.ipynb
 
 ---
 
-## Notebook walkthrough
-
-| Cell | What it does |
-|---|---|
-| **1 – Load data** | Reads `timeseries_data.csv` with pandas, shows descriptive stats |
-| **2 – Detection** | Runs PELT and KernelCPD on every variable, prints found changepoints and runtimes |
-| **3 – Visualisation** | One subplot per variable — raw signal, PELT segment means, both sets of changepoints, agreement markers |
-| **4 – Summary table** | Per-variable count of changepoints, penalties used, runtime in ms |
-
----
-
 ## How the algorithms work
 
 ### PELT
-Minimises a penalised segmentation cost over the signal:
+Minimises a penalised segmentation cost:
 
 ```
 minimise  Σ cost(segment) + pen × (number of changepoints)
@@ -111,7 +160,7 @@ minimise  Σ cost(segment) + pen × (number of changepoints)
 Uses an **inequality pruning** test to discard candidate changepoints that can never be optimal, giving O(n) average time.
 
 ### KernelCPD
-Maps each sample into a **reproducing kernel Hilbert space (RKHS)** via an RBF kernel, then minimises the **maximum mean discrepancy (MMD)** between adjacent segments. Because it operates on the full kernel embedding rather than raw values, it can detect subtle distributional shifts that PELT may miss — at the cost of O(n²) worst-case complexity.
+Maps each sample into a **reproducing kernel Hilbert space (RKHS)** via an RBF kernel, then minimises the **maximum mean discrepancy (MMD)** between adjacent segments. Operates on the full kernel embedding rather than raw values.
 
 ### Reading the plot
 
@@ -129,7 +178,5 @@ Maps each sample into a **reproducing kernel Hilbert space (RKHS)** via an RBF k
 
 1. Replace `timeseries_data.csv` with your own file — keep a `timestamp` column and numeric sensor columns.
 2. Adjust the `config` dict in cell 2: `{column: (pelt_penalty, kernel_penalty)}`.
-   - Start high and lower until results match expectations.
-   - Signals with periodic components need a higher KernelCPD penalty.
-   - Signals with large absolute values (e.g. RPM) need a lower PELT penalty.
-3. Swap `model="rbf"` / `kernel="rbf"` for `"l2"` (mean-only) or `"l1"` (robust to outliers) if needed.
+3. If your signal has periodic components, consider removing the trend before running KernelCPD.
+4. Start with a high penalty and lower it until results stabilise — jumping to a low penalty first leads to over-segmentation that is hard to walk back.
